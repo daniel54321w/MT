@@ -13,64 +13,76 @@ const ONESIGNAL_URL = "https://onesignal.com/api/v1/notifications";
 
 const dayNames = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"];
 
+function readData() {
+  try {
+    return JSON.parse(fs.readFileSync(FILE, "utf8"));
+  } catch (e) {
+    return [];
+  }
+}
+
+function writeData(data) {
+  fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
+}
+
 app.get("/meds", (req, res) => {
-  fs.readFile(FILE, "utf8", (err, data) => {
-    if (err) return res.status(500).send("error");
-    res.send(JSON.parse(data));
-  });
+  const userId = req.query.userId;
+  const data = readData();
+  const userMeds = data.filter(m => m.userId === userId);
+  res.send(userMeds);
 });
 
 app.post("/add", (req, res) => {
-  const med = req.body;
-  fs.readFile(FILE, "utf8", (err, data) => {
-    let meds = [];
-    if (!err) meds = JSON.parse(data || "[]");
-    meds.push({ ...med, taken: false });
-    fs.writeFile(FILE, JSON.stringify(meds, null, 2), () => {
-      res.send({ success: true });
-    });
-  });
+  const { name, time, day, userId, playerId } = req.body;
+  const data = readData();
+  data.push({ name, time, day, userId, playerId, taken: false });
+  writeData(data);
+  res.send({ success: true });
 });
 
 app.post("/acknowledge", (req, res) => {
-  const index = req.body.index;
-  fs.readFile(FILE, "utf8", (err, data) => {
-    if (err) return res.status(500).send("error");
-    let meds = JSON.parse(data);
-    if (meds[index]) meds[index].taken = true;
-    fs.writeFile(FILE, JSON.stringify(meds, null, 2), () => {
-      res.send({ success: true });
-    });
-  });
+  const { index, userId } = req.body;
+  const data = readData();
+  const userMeds = data.filter(m => m.userId === userId);
+  if (userMeds[index]) {
+    userMeds[index].taken = true;
+    // עדכון הרשימה המקורית
+    const updated = data.map(m => (m.userId === userId && m.name === userMeds[index].name && m.time === userMeds[index].time) ? userMeds[index] : m);
+    writeData(updated);
+  }
+  res.send({ success: true });
 });
 
 app.get("/trigger", async (req, res) => {
   const now = new Date();
   const currentDay = dayNames[now.getDay()];
-  const currentTime = now.toTimeString().slice(0, 5); // hh:mm
+  const currentTime = now.toTimeString().slice(0, 5);
+
+  const data = readData();
+  const notifications = [];
+
+  for (let med of data) {
+    if (med.day === currentDay && med.time === currentTime && !med.taken && med.playerId) {
+      notifications.push(fetch(ONESIGNAL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${ONESIGNAL_API_KEY}`,
+        },
+        body: JSON.stringify({
+          app_id: ONESIGNAL_APP_ID,
+          include_player_ids: [med.playerId],
+          headings: { "en": "הגיע זמן התרופה!" },
+          contents: { "he": `נא לקחת את התרופה: ${med.name}` },
+          url: "https://golden-chebakia-f94a0b.netlify.app"
+        }),
+      }));
+    }
+  }
 
   try {
-    const data = fs.readFileSync(FILE, "utf8");
-    const meds = JSON.parse(data);
-    for (let med of meds) {
-      if (med.day === currentDay && med.time === currentTime && !med.taken) {
-        await fetch(ONESIGNAL_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Basic ${ONESIGNAL_API_KEY}`,
-          },
-          body: JSON.stringify({
-            app_id: ONESIGNAL_APP_ID,
-            included_segments: ["All"],
-            headings: { "en": "הגיע זמן התרופה!" },
-            contents: { "he": `נא לקחת את התרופה: ${med.name}` },
-            url: "https://golden-chebakia-f94a0b.netlify.app"
-          }),
-        });
-      }
-    }
-    res.send({ status: "notifications checked" });
+    await Promise.all(notifications);
+    res.send({ status: "notifications sent", count: notifications.length });
   } catch (e) {
     res.status(500).send("שגיאה בשליחת התראות");
   }
